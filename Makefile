@@ -133,10 +133,12 @@ endif
 	fi
 	$(INSTALL) -d "$(DESTDIR)$(moddir)"
 ifneq ($(MP4BOX_STATIC),yes)
+ifneq ($(STATIC_MODULES), yes)
 	$(INSTALL) bin/gcc/*$(DYN_LIB_SUFFIX) "$(DESTDIR)$(moddir)"
 	rm -f $(DESTDIR)$(moddir)/libgpac$(DYN_LIB_SUFFIX)
 	rm -f $(DESTDIR)$(moddir)/nposmozilla$(DYN_LIB_SUFFIX)
 	$(MAKE) installdylib
+endif
 endif
 	$(INSTALL) -d "$(DESTDIR)$(mandir)"
 	$(INSTALL) -d "$(DESTDIR)$(mandir)/man1"
