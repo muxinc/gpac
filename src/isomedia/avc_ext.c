@@ -843,7 +843,10 @@ static GF_AVCConfig *AVC_DuplicateConfig(GF_AVCConfig *cfg)
 {
 	u32 i, count;
 	GF_AVCConfigSlot *p1, *p2;
-	GF_AVCConfig *cfg_new = gf_odf_avc_cfg_new();
+	GF_AVCConfig *cfg_new;
+	if (!cfg)
+		return NULL;
+	cfg_new = gf_odf_avc_cfg_new();
 	cfg_new->AVCLevelIndication = cfg->AVCLevelIndication;
 	cfg_new->AVCProfileIndication = cfg->AVCProfileIndication;
 	cfg_new->configurationVersion = cfg->configurationVersion;
@@ -1486,6 +1489,7 @@ GF_Err gf_isom_avc_config_update(GF_ISOFile *the_file, u32 trackNumber, u32 Desc
 	return gf_isom_avc_config_update_ex(the_file, trackNumber, DescriptionIndex, cfg, 0);
 }
 
+GF_EXPORT
 GF_Err gf_isom_svc_config_update(GF_ISOFile *the_file, u32 trackNumber, u32 DescriptionIndex, GF_AVCConfig *cfg, Bool is_add)
 {
 	return gf_isom_avc_config_update_ex(the_file, trackNumber, DescriptionIndex, cfg, is_add ? 1 : 2);
@@ -1931,6 +1935,7 @@ GF_Err gf_isom_hevc_set_tile_config(GF_ISOFile *the_file, u32 trackNumber, u32 D
 	return gf_isom_hevc_config_update_ex(the_file, trackNumber, DescriptionIndex, cfg, is_base_track ? GF_ISOM_HVCC_SET_TILE_BASE_TRACK : GF_ISOM_HVCC_SET_TILE);
 }
 
+GF_EXPORT
 GF_Err gf_isom_lhvc_config_update(GF_ISOFile *the_file, u32 trackNumber, u32 DescriptionIndex, GF_HEVCConfig *cfg, GF_ISOMLHEVCTrackType track_type)
 {
 	if (cfg) cfg->is_lhvc = GF_TRUE;
@@ -1963,6 +1968,10 @@ GF_Box *gf_isom_clone_config_box(GF_Box *box)
 	case GF_ISOM_BOX_TYPE_HVCC:
 		clone = gf_isom_box_new(box->type);
 		((GF_HEVCConfigurationBox *)clone)->config = HEVC_DuplicateConfig(((GF_HEVCConfigurationBox *)box)->config);
+		break;
+	case GF_ISOM_BOX_TYPE_AV1C:
+		clone = gf_isom_box_new(box->type);
+		((GF_AV1ConfigurationBox *)clone)->config = AV1_DuplicateConfig(((GF_AV1ConfigurationBox *)box)->config);
 		break;
 	default:
 		clone = NULL;
@@ -2777,6 +2786,114 @@ GF_Err vpcc_Size(GF_Box *s)
 
 	return GF_OK;
 }
+
+
+GF_Box *SmDm_New()
+{
+	ISOM_DECL_BOX_ALLOC(GF_SMPTE2086MasteringDisplayMetadataBox, GF_ISOM_BOX_TYPE_SMDM);
+	return (GF_Box *)tmp;
+}
+
+void SmDm_del(GF_Box *a)
+{
+	GF_SMPTE2086MasteringDisplayMetadataBox *p = (GF_SMPTE2086MasteringDisplayMetadataBox *)a;
+	gf_free(p);
+}
+
+GF_Err SmDm_Read(GF_Box *s, GF_BitStream *bs)
+{
+	GF_SMPTE2086MasteringDisplayMetadataBox *p = (GF_SMPTE2086MasteringDisplayMetadataBox *)s;
+	p->primaryRChromaticity_x = gf_bs_read_u16(bs);
+	p->primaryRChromaticity_y = gf_bs_read_u16(bs);
+	p->primaryGChromaticity_x = gf_bs_read_u16(bs);
+	p->primaryGChromaticity_y = gf_bs_read_u16(bs);
+	p->primaryBChromaticity_x = gf_bs_read_u16(bs);
+	p->primaryBChromaticity_y = gf_bs_read_u16(bs);
+	p->whitePointChromaticity_x = gf_bs_read_u16(bs);
+	p->whitePointChromaticity_y = gf_bs_read_u16(bs);
+	p->luminanceMax = gf_bs_read_u32(bs);
+	p->luminanceMin = gf_bs_read_u32(bs);
+
+	return GF_OK;
+}
+
+#ifndef GPAC_DISABLE_ISOM_WRITE
+
+GF_Err SmDm_Write(GF_Box *s, GF_BitStream *bs)
+{
+	GF_Err e;
+	GF_SMPTE2086MasteringDisplayMetadataBox *p = (GF_SMPTE2086MasteringDisplayMetadataBox*)s;
+	e = gf_isom_box_write_header(s, bs);
+	if (e) return e;
+
+	gf_bs_write_u16(bs, p->primaryRChromaticity_x);
+	gf_bs_write_u16(bs, p->primaryRChromaticity_y);
+	gf_bs_write_u16(bs, p->primaryGChromaticity_x);
+	gf_bs_write_u16(bs, p->primaryGChromaticity_y);
+	gf_bs_write_u16(bs, p->primaryBChromaticity_x);
+	gf_bs_write_u16(bs, p->primaryBChromaticity_y);
+	gf_bs_write_u16(bs, p->whitePointChromaticity_x);
+	gf_bs_write_u16(bs, p->whitePointChromaticity_y);
+	gf_bs_write_u32(bs, p->luminanceMax);
+	gf_bs_write_u32(bs, p->luminanceMin);
+
+	return GF_OK;
+}
+
+GF_Err SmDm_Size(GF_Box *s)
+{
+	GF_SMPTE2086MasteringDisplayMetadataBox *p = (GF_SMPTE2086MasteringDisplayMetadataBox*)s;
+	p->size += 24;
+	return GF_OK;
+}
+
+#endif /*GPAC_DISABLE_ISOM_WRITE*/
+
+
+GF_Box *CoLL_New()
+{
+	ISOM_DECL_BOX_ALLOC(GF_VPContentLightLevelBox, GF_ISOM_BOX_TYPE_COLL);
+	return (GF_Box *)tmp;
+}
+
+void CoLL_del(GF_Box *a)
+{
+	GF_VPContentLightLevelBox *p = (GF_VPContentLightLevelBox *)a;
+	gf_free(p);
+}
+
+GF_Err CoLL_Read(GF_Box *s, GF_BitStream *bs)
+{
+	GF_VPContentLightLevelBox *p = (GF_VPContentLightLevelBox *)s;
+	p->maxCLL = gf_bs_read_u16(bs);
+	p->maxFALL = gf_bs_read_u16(bs);
+
+	return GF_OK;
+}
+
+#ifndef GPAC_DISABLE_ISOM_WRITE
+
+GF_Err CoLL_Write(GF_Box *s, GF_BitStream *bs)
+{
+	GF_Err e;
+	GF_VPContentLightLevelBox *p = (GF_VPContentLightLevelBox*)s;
+	e = gf_isom_box_write_header(s, bs);
+	if (e) return e;
+
+	gf_bs_write_u16(bs, p->maxCLL);
+	gf_bs_write_u16(bs, p->maxFALL);
+
+	return GF_OK;
+}
+
+GF_Err CoLL_Size(GF_Box *s)
+{
+	GF_VPContentLightLevelBox *p = (GF_VPContentLightLevelBox*)s;
+	p->size += 4;
+	return GF_OK;
+}
+
+#endif /*GPAC_DISABLE_ISOM_WRITE*/
 
 
 

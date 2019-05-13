@@ -137,7 +137,7 @@ u32 gf_isom_probe_file(const char *fileName)
 	case GF_ISOM_BOX_TYPE_META:
 	case GF_ISOM_BOX_TYPE_VOID:
 	case GF_ISOM_BOX_TYPE_JP:
-	case GF_ISOM_BOX_TYPE_WIDE:
+	case GF_QT_BOX_TYPE_WIDE:
 		return 1;
 	default:
 		return 0;
@@ -1485,12 +1485,42 @@ u32 gf_isom_get_sample_count(GF_ISOFile *the_file, u32 trackNumber)
 	       ;
 }
 
+GF_EXPORT
 u32 gf_isom_get_constant_sample_size(GF_ISOFile *the_file, u32 trackNumber)
 {
 	GF_TrackBox *trak;
 	trak = gf_isom_get_track_from_file(the_file, trackNumber);
 	if (!trak) return 0;
 	return trak->Media->information->sampleTable->SampleSize->sampleSize;
+}
+
+GF_EXPORT
+u32 gf_isom_get_constant_sample_duration(GF_ISOFile *the_file, u32 trackNumber)
+{
+	GF_TrackBox *trak;
+	trak = gf_isom_get_track_from_file(the_file, trackNumber);
+	if (!trak) return 0;
+	if (trak->Media->information->sampleTable->TimeToSample->nb_entries != 1) return 0;
+	return trak->Media->information->sampleTable->TimeToSample->entries[0].sampleDelta;
+}
+
+GF_EXPORT
+Bool gf_isom_enable_raw_pack(GF_ISOFile *the_file, u32 trackNumber, u32 pack_num_samples)
+{
+	GF_TrackBox *trak;
+	trak = gf_isom_get_track_from_file(the_file, trackNumber);
+	if (!trak) return GF_FALSE;
+	trak->pack_num_samples = 0;
+	//we only activate sample packing for raw audio
+	if (!trak->Media->handler) return GF_FALSE;
+	if (trak->Media->handler->handlerType != GF_ISOM_MEDIA_AUDIO) return GF_FALSE;
+	//and sample duration of 1
+	if (trak->Media->information->sampleTable->TimeToSample->nb_entries != 1) return GF_FALSE;
+	if (trak->Media->information->sampleTable->TimeToSample->entries[0].sampleDelta != 1) return GF_FALSE;
+	//and sample with constant size
+	if (!trak->Media->information->sampleTable->SampleSize->sampleSize) return GF_FALSE;
+	trak->pack_num_samples = pack_num_samples;
+	return pack_num_samples ? GF_TRUE : GF_FALSE;
 }
 
 GF_EXPORT
@@ -2432,29 +2462,6 @@ GF_Err gf_isom_get_chunks_infos(GF_ISOFile *movie, u32 trackNumber, u32 *dur_min
 	if (size_max) *size_max = smax;
 	return GF_OK;
 }
-
-GF_EXPORT
-u32 gf_isom_get_sample_fragment_count(GF_ISOFile *the_file, u32 trackNumber, u32 sampleNumber)
-{
-	GF_TrackBox *trak;
-	trak = gf_isom_get_track_from_file(the_file, trackNumber);
-	if (!trak) return 0;
-
-	//Padding info
-	return stbl_GetSampleFragmentCount(trak->Media->information->sampleTable->Fragments, sampleNumber);
-}
-
-GF_EXPORT
-u16 gf_isom_get_sample_fragment_size(GF_ISOFile *the_file, u32 trackNumber, u32 sampleNumber, u32 FragmentIndex)
-{
-	GF_TrackBox *trak;
-	trak = gf_isom_get_track_from_file(the_file, trackNumber);
-	if (!trak || !FragmentIndex) return 0;
-
-	//Padding info
-	return stbl_GetSampleFragmentSize(trak->Media->information->sampleTable->Fragments, sampleNumber, FragmentIndex);
-}
-
 
 GF_EXPORT
 GF_Err gf_isom_get_fragment_defaults(GF_ISOFile *the_file, u32 trackNumber,
@@ -3689,6 +3696,25 @@ void gf_isom_reset_sample_count(GF_ISOFile *movie)
 #endif
 }
 
+GF_EXPORT
+Bool gf_isom_has_cenc_sample_group(GF_ISOFile *the_file, u32 trackNumber)
+{
+	GF_TrackBox *trak;
+	u32 i, count;
+
+	trak = gf_isom_get_track_from_file(the_file, trackNumber);
+	if (!trak) return GF_FALSE;
+	if (!trak->Media->information->sampleTable->sampleGroups) return GF_FALSE;
+
+	count = gf_list_count(trak->Media->information->sampleTable->sampleGroupsDescription);
+	for (i=0; i<count; i++) {
+		GF_SampleGroupDescriptionBox *sgdesc = (GF_SampleGroupDescriptionBox*)gf_list_get(trak->Media->information->sampleTable->sampleGroupsDescription, i);
+		if (sgdesc->grouping_type==GF_ISOM_SAMPLE_GROUP_SEIG) {
+			return GF_TRUE;
+		}
+	}
+	return GF_FALSE;
+}
 
 GF_EXPORT
 GF_Err gf_isom_get_sample_rap_roll_info(GF_ISOFile *the_file, u32 trackNumber, u32 sample_number, Bool *is_rap, Bool *has_roll, s32 *roll_distance)
@@ -4048,7 +4074,6 @@ GF_Err gf_isom_get_sample_cenc_info_ex(GF_TrackBox *trak, void *traf, GF_SampleE
 	u32 i, count;
 	u32 descIndex, chunkNum;
 	u64 offset;
-	u8 edit;
 	u32 first_sample_in_entry, last_sample_in_entry;
 	GF_CENCSampleEncryptionGroupEntry *entry;
 
@@ -4066,7 +4091,7 @@ GF_Err gf_isom_get_sample_cenc_info_ex(GF_TrackBox *trak, void *traf, GF_SampleE
 #endif
 
 	if (trak && trak->Media->information->sampleTable->SampleSize && trak->Media->information->sampleTable->SampleSize->sampleCount>=sample_number) {
-		stbl_GetSampleInfos(trak->Media->information->sampleTable, sample_number, &offset, &chunkNum, &descIndex, &edit);
+		stbl_GetSampleInfos(trak->Media->information->sampleTable, sample_number, &offset, &chunkNum, &descIndex, NULL);
 	} else {
 		//this is dump mode of fragments, we haven't merged tables yet :(
 		descIndex = 1;
@@ -4357,4 +4382,25 @@ GF_Err gf_isom_get_bitrate(GF_ISOFile *movie, u32 trackNumber, u32 sampleDescInd
 	if (decode_buffer_size) *decode_buffer_size = dbsize;
 	return GF_OK;
 }
+
+GF_EXPORT
+Bool gf_isom_sample_was_traf_start(GF_ISOFile *movie, u32 trackNumber, u32 sampleNum)
+{
+	u32 i;
+	GF_TrackBox *trak;
+	GF_TrafToSampleMap *tmap;
+
+	trak = gf_isom_get_track_from_file(movie, trackNumber);
+	if (!trak || !trak->Media) return GF_FALSE;
+	if (!trak->Media->information->sampleTable->traf_map) return GF_FALSE;
+
+	tmap = trak->Media->information->sampleTable->traf_map;
+	if (!tmap) return GF_FALSE;
+	for (i=0; i<tmap->nb_entries; i++) {
+		if (tmap->sample_num[i] == sampleNum) return GF_TRUE;
+		if (tmap->sample_num[i] > sampleNum) return GF_FALSE;
+	}
+	return GF_FALSE;
+}
+
 #endif /*GPAC_DISABLE_ISOM*/

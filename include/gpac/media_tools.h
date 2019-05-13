@@ -103,9 +103,18 @@ GF_Err gf_media_change_par(GF_ISOFile *file, u32 track, s32 ar_num, s32 ar_den);
  *Removes all non rap samples (sync and other RAP sample group info) from the track.
  * \param file target movie
  * \param track target track
+ * \param do_thin if set, removes only non-reference pictures
  * \return error if any
  */
-GF_Err gf_media_remove_non_rap(GF_ISOFile *file, u32 track);
+GF_Err gf_media_remove_non_rap(GF_ISOFile *file, u32 track, Bool non_ref_only);
+
+/*!
+ *updates bitrate info on given track.
+ * \param file target movie
+ * \param track target track
+ */
+void gf_media_update_bitrate(GF_ISOFile *file, u32 track);
+
 #endif
 
 /*! @} */
@@ -178,7 +187,7 @@ enum
 	GF_IMPORT_OVSBR = 1<<14,
 	/*! set subsample information with SVC*/
 	GF_IMPORT_SET_SUBSAMPLES = 1<<15,
-	/*! force to mark non-IDR frmaes with sync data (I slices,) to be marked as sync points points
+	/*! force to mark non-IDR frames with sync data (I slices,) to be marked as sync points points
 	THE RESULTING FILE IS NOT COMPLIANT*/
 	GF_IMPORT_FORCE_SYNC = 1<<16,
 	/*! keep trailing 0 bytes in AU payloads when any*/
@@ -205,7 +214,11 @@ enum
 	GF_IMPORT_KEEP_REFS = 1<<27,
 	/*! keeps AV1 temporal delimiter OBU in the samples*/
 	GF_IMPORT_KEEP_AV1_TEMPORAL_OBU  = 1<<28,
-	
+	/*! imports sample dependencies information*/
+	GF_IMPORT_SAMPLE_DEPS  = 1<<29,
+	/*! when set a default ccst box is used in the sample entry */
+	GF_IMPORT_USE_CCST  = 1<<30,
+
 	/*! when set by user during import, will abort*/
 	GF_IMPORT_DO_ABORT = 1<<31
 };
@@ -364,6 +377,12 @@ typedef struct __track_import
 	GF_Err last_error;
 
 	GF_AudioSampleEntryImportMode asemode;
+
+	Bool audio_roll_change;
+	s16 audio_roll;
+
+	Bool is_alpha;
+	Bool keep_audelim;
 } GF_MediaImporter;
 
 /*!
@@ -558,6 +577,8 @@ typedef struct
 	Double period_duration;
 	/*! if true, the dasher inputs will open each time the segmentation function is called */
 	Bool no_cache;
+	/*! if true and only one media stream in target segment, the moov will use the media stream timescale*/
+	Bool sscale;
 } GF_DashSegmenterInput;
 
 /*!
@@ -766,9 +787,10 @@ GF_Err gf_dasher_set_segment_marker(GF_DASHSegmenter *dasher, u32 segment_marker
  *	\param enable_sidx enable or disable
  *	\param subsegs_per_sidx number of subsegments per segment
  *	\param daisy_chain_sidx enable daisy chaining of sidx
+ *	\param use_ssix enables ssix generation, level 1 for I-frames, the rest of the segement not  mapped
  *	\return error code if any
 */
-GF_Err gf_dasher_enable_sidx(GF_DASHSegmenter *dasher, Bool enable_sidx, u32 subsegs_per_sidx, Bool daisy_chain_sidx);
+GF_Err gf_dasher_enable_sidx(GF_DASHSegmenter *dasher, Bool enable_sidx, u32 subsegs_per_sidx, Bool daisy_chain_sidx, Bool use_ssix);
 
 /*!
  Sets mode for the dash segmenter.

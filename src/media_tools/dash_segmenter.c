@@ -94,7 +94,7 @@ struct __gf_dash_segmenter
 	u32 segment_marker_4cc;
 	Bool enable_sidx;
 	u32 subsegs_per_sidx;
-	Bool daisy_chain_sidx;
+	Bool daisy_chain_sidx, use_ssix;
 
 	Bool fragments_start_with_rap;
 	char *tmpdir;
@@ -178,6 +178,7 @@ struct _dash_segment_input
 	u32 bandwidth;
 	u32 dependency_bandwidth;
 	char *dependencyID;
+	Bool sscale;
 
 	/*if 0, input is disabled*/
 	u32 adaptation_set;
@@ -769,7 +770,7 @@ typedef struct
 	Bool cues_use_edits;
 } GF_ISOMTrackFragmenter;
 
-static u64 isom_get_next_sap_time(GF_ISOFile *input, u32 track, u32 sample_count, u32 sample_num)
+static u64 isom_get_next_sap_time(GF_ISOFile *input, u32 track, u32 sample_count, u32 sample_num, Bool *is_eos)
 {
 	GF_ISOSample *samp;
 	u64 time;
@@ -787,8 +788,10 @@ static u64 isom_get_next_sap_time(GF_ISOFile *input, u32 track, u32 sample_count
 		}
 	}
 	//TRICK: if we don't found next RAP, return time of the last sample in track
-	if (!found_sample)
+	if (!found_sample) {
 		found_sample = sample_count;
+		*is_eos = GF_TRUE;
+	}
 	samp = gf_isom_get_sample_info(input, track, found_sample, NULL, NULL);
 	time = samp->DTS;
 	gf_isom_sample_del(&samp);
@@ -1050,7 +1053,7 @@ static u32 cicp_get_channel_config(u32 nb_chan,u32 nb_surr, u32 nb_lfe)
 static GF_Err isom_segment_file(GF_ISOFile *input, const char *output_file, GF_DASHSegmenter *dasher, GF_DashSegInput *dash_input, Bool first_in_set)
 {
 	u8 NbBits;
-	u32 i, TrackNum, descIndex, j, count, nb_sync, ref_track_id, nb_tracks_done;
+	u32 i, TrackNum, descIndex, j, count, nb_sync, ref_track_id, nb_tracks_done=0;
 	u32 sample_duration, defaultSize, defaultDescriptionIndex, defaultRandomAccess, nb_samp, nb_done;
 	u32 nb_video, nb_auxv, nb_pict, nb_audio, nb_text, nb_scene, mpd_timescale;
 	u8 defaultPadding;
@@ -1063,7 +1066,7 @@ static GF_Err isom_segment_file(GF_ISOFile *input, const char *output_file, GF_D
 	GF_ISOSample *sample, *next;
 	GF_List *fragmenters;
 	u64 MaxFragmentDuration, MaxSegmentDuration, period_duration;
-	Double segment_start_time, SegmentDuration, maxFragDurationOverSegment;
+	Double segment_start_time=0, SegmentDuration, maxFragDurationOverSegment;
 	u64 presentationTimeOffset = 0;
 	Double file_duration, max_segment_duration;
 	u32 nb_segments, width, height, sample_rate, nb_channels, nb_surround, nb_lfe, sar_w, sar_h, fps_num, fps_denum, startNumber;
@@ -1116,6 +1119,7 @@ static GF_Err isom_segment_file(GF_ISOFile *input, const char *output_file, GF_D
 	Bool seg_dur_adjusted = GF_FALSE;
 	u32 nb_enc = 0;
 	u32 cue_start = 0;
+	u32 force_timescale = 0;
 	SegmentName[0] = 0;
 	SegmentDuration = 0;
 	nb_samp = 0;
@@ -1334,7 +1338,6 @@ static GF_Err isom_segment_file(GF_ISOFile *input, const char *output_file, GF_D
 	for (i=0; i<gf_isom_get_track_count(input); i++) {
 		u32 _w, _h, _nb_ch, vidtype;
 		u32 _sr = 0;
-
 		u32 mtype = gf_isom_get_media_type(input, i+1);
 		if (mtype == GF_ISOM_MEDIA_HINT) continue;
 
@@ -1345,6 +1348,11 @@ static GF_Err isom_segment_file(GF_ISOFile *input, const char *output_file, GF_D
 			continue;
 
 		if (!dash_moov_setup) {
+
+			if (!force_timescale && dash_input->sscale) {
+				force_timescale = gf_isom_get_media_timescale(input, i+1);
+			}
+
 			e = gf_isom_clone_track(input, i+1, output, GF_FALSE, &TrackNum);
 			if (e) goto err_exit;
 
@@ -1453,6 +1461,7 @@ static GF_Err isom_segment_file(GF_ISOFile *input, const char *output_file, GF_D
 		tf->MediaType = gf_isom_get_media_type(input, i+1);
 		tf->sample_duration = sample_duration;
 		mpd_timescale = tf->TimeScale;
+		gf_isom_enable_raw_pack(input, i+1, 2048);
 
 		if ( (max_track_duration.num / max_track_duration.den) < gf_isom_get_track_duration(input, i+1)) {
 			max_track_duration.num = gf_isom_get_track_duration(input, i+1);
@@ -1689,6 +1698,9 @@ static GF_Err isom_segment_file(GF_ISOFile *input, const char *output_file, GF_D
 	//if single segment, add msix brand if we use indexes
 	gf_isom_modify_alternate_brand(output, GF_ISOM_BRAND_MSIX, ((dasher->single_file_mode==1) && dasher->enable_sidx) ? 1 : 0);
 
+	if (force_timescale)
+		gf_isom_set_timescale(output, force_timescale);
+		
 	//flush movie
 	e = gf_isom_finalize_for_fragment(output, 1);
 	if (e) goto err_exit;
@@ -1991,6 +2003,7 @@ restart_fragmentation_pass:
 				Bool stop_frag = GF_FALSE;
 				Bool is_redundant_sample = GF_FALSE;
 				u32 split_sample_duration = 0;
+				u32 next_sample_num_offset = 1;
 				Double clamp_duration = dash_input->clamp_duration;
 				if (!clamp_duration) clamp_duration = dash_input->media_duration;
 
@@ -2028,10 +2041,13 @@ restart_fragmentation_pass:
 				}
 
 				gf_isom_get_sample_padding_bits(input, tf->OriginalTrack, tf->SampleNum+1, &NbBits);
+				if (sample->nb_pack) {
+					next_sample_num_offset = sample->nb_pack;
+				}
 
-				next = gf_isom_get_sample(input, tf->OriginalTrack, tf->SampleNum + 2, &j);
+				next = gf_isom_get_sample(input, tf->OriginalTrack, tf->SampleNum + 1 + next_sample_num_offset, &j);
 
-				if (next) sample_duration = gf_isom_get_sample_duration(input, tf->OriginalTrack, tf->SampleNum+2);
+				if (next) sample_duration = gf_isom_get_sample_duration(input, tf->OriginalTrack, tf->SampleNum+1 + next_sample_num_offset);
 				if (clamp_duration && next && clamp_duration*tf->TimeScale < next->DTS + sample_duration) {
 					gf_isom_sample_del(&next);
 					next = NULL;
@@ -2068,6 +2084,10 @@ restart_fragmentation_pass:
 					force_eos = GF_TRUE;
 				} else {
 					sample_duration = (u32) (gf_isom_get_media_duration(input, tf->OriginalTrack) - (sample->DTS - tf->loop_ts_offset));
+				}
+
+				if (sample->nb_pack) {
+					sample_duration /= sample->nb_pack;
 				}
 
 				if (tf->splitable) {
@@ -2125,7 +2145,7 @@ restart_fragmentation_pass:
 							ref_track_next_cts += sample_duration;
 						} else {
 							u64 last_cts = gf_isom_get_media_duration(input, tf->OriginalTrack);
-							u64 dur = (dash_input->clamp_duration ? dash_input->clamp_duration : dash_input->media_duration) * tf->TimeScale;
+							u64 dur = (u64) ((dash_input->clamp_duration ? dash_input->clamp_duration : dash_input->media_duration) * tf->TimeScale);
 							if (dur < last_cts)
 								last_cts = dur;
 
@@ -2183,7 +2203,7 @@ restart_fragmentation_pass:
 				} else {
 					gf_isom_sample_del(&sample);
 					sample = next;
-					tf->SampleNum += 1;
+					tf->SampleNum += next_sample_num_offset;
 					tf->split_sample_dts_shift = 0;
 				}
 				tf->FragmentLength += sample_duration;
@@ -2215,14 +2235,16 @@ restart_fragmentation_pass:
 				if (next && SAP_type) {
 					if (tf->is_ref_track) {
 						if (split_seg_at_rap) {
+							Bool next_sap_is_eos=GF_FALSE;
 							u64 next_sap_time;
-							u64 frag_dur, next_dur;
+							u64 frag_dur, next_dur, cur_frag_dur;
 							next_dur = gf_isom_get_sample_duration(input, tf->OriginalTrack, tf->SampleNum + 1);
 							if (!next_dur) next_dur = sample_duration;
 							/*duration of fragment if we add this rap*/
 							frag_dur = (tf->FragmentLength+next_dur)*dasher->dash_scale / tf->TimeScale;
+							cur_frag_dur = (tf->FragmentLength)*dasher->dash_scale / tf->TimeScale;
 							next_sample_rap = GF_TRUE;
-							next_sap_time = isom_get_next_sap_time(input, tf->OriginalTrack, tf->SampleCount, tf->SampleNum + 2);
+							next_sap_time = isom_get_next_sap_time(input, tf->OriginalTrack, tf->SampleCount, tf->SampleNum + 2, &next_sap_is_eos);
 
 							/*if no more SAP after this one, do not switch segment*/
 							if (next_sap_time) {
@@ -2288,6 +2310,10 @@ restart_fragmentation_pass:
 											if (dasher->split_on_closest && ABS(diff_next) > ABS(diff_current)) {
 												do_split = GF_TRUE;
 												GF_LOG(GF_LOG_DEBUG, GF_LOG_DASH, ("[DASH] Stopping because of drift between next_sap_time=%.2f and boundary=%.2f (drift: %.2f) is bigger than current drift at %.2f (%.2f).\n", next_sap_time / (double)tf->TimeScale, (cur_seg - 1) * sdur, diff_next, ((Double)tf->next_sample_dts) / tf->TimeScale, diff_current));
+											}
+											//handle the case where we are exactly aligned and not at the end of stream
+											if (!dasher->split_on_closest && !dasher->split_on_bound && !diff_current && (SegmentDuration + cur_frag_dur == MaxSegmentDuration) && !next_sap_is_eos) {
+												do_split = GF_TRUE;
 											}
 										}
 
@@ -2618,7 +2644,7 @@ restart_fragmentation_pass:
 				}
 
 				GF_LOG(GF_LOG_DEBUG, GF_LOG_DASH, ("[DASH] Closing segment %s at "LLU" us, at UTC "LLU" - segment AST "LLU" (MPD AST "LLU")\n", SegmentName, gf_sys_clock_high_res(), gf_net_get_utc(), generation_start_utc + period_duration + (u64)segment_start_time, generation_start_utc ));
-				gf_isom_close_segment(output, dasher->enable_sidx ? dasher->subsegs_per_sidx : 0, dasher->enable_sidx ? ref_track_id : 0, ref_track_first_dts, tfref ? tfref->media_time_to_pres_time_shift : tf->media_time_to_pres_time_shift, ref_track_next_cts, dasher->daisy_chain_sidx, last_segment, GF_FALSE, dasher->segment_marker_4cc, &idx_start_range, &idx_end_range, NULL);
+				gf_isom_close_segment(output, dasher->enable_sidx ? dasher->subsegs_per_sidx : 0, dasher->enable_sidx ? ref_track_id : 0, ref_track_first_dts, tfref ? tfref->media_time_to_pres_time_shift : tf->media_time_to_pres_time_shift, ref_track_next_cts, dasher->daisy_chain_sidx, dasher->use_ssix, last_segment, GF_FALSE, dasher->segment_marker_4cc, &idx_start_range, &idx_end_range, NULL);
 				nbFragmentInSegment = 0;
 
 				//take care of scalable reps
@@ -2666,7 +2692,7 @@ restart_fragmentation_pass:
 
 	if (simulation_pass) {
 		/*OK, we have all segments and frags per segments*/
-		gf_isom_allocate_sidx(output, dasher->subsegs_per_sidx, dasher->daisy_chain_sidx, nb_segments_info, segments_info, &index_start_range, &index_end_range );
+		gf_isom_allocate_sidx(output, dasher->subsegs_per_sidx, dasher->daisy_chain_sidx, nb_segments_info, segments_info, &index_start_range, &index_end_range, dasher->use_ssix );
 		gf_free(segments_info);
 		segments_info = NULL;
 		simulation_pass = GF_FALSE;
@@ -2694,7 +2720,7 @@ restart_fragmentation_pass:
 		last_seg_dur = SegmentDuration;
 
 		GF_LOG(GF_LOG_DEBUG, GF_LOG_DASH, ("[DASH] Closing segment %s at "LLU" us, at UTC "LLU"\n", SegmentName, gf_sys_clock_high_res(), gf_net_get_utc()));
-		gf_isom_close_segment(output, dasher->enable_sidx ? dasher->subsegs_per_sidx : 0, dasher->enable_sidx ? ref_track_id : 0, ref_track_first_dts, tfref ? tfref->media_time_to_pres_time_shift : tf->media_time_to_pres_time_shift, ref_track_next_cts, dasher->daisy_chain_sidx, GF_TRUE, GF_FALSE, dasher->segment_marker_4cc, &idx_start_range, &idx_end_range, NULL);
+		gf_isom_close_segment(output, dasher->enable_sidx ? dasher->subsegs_per_sidx : 0, dasher->enable_sidx ? ref_track_id : 0, ref_track_first_dts, tfref ? tfref->media_time_to_pres_time_shift : tf->media_time_to_pres_time_shift, ref_track_next_cts, dasher->daisy_chain_sidx, dasher->use_ssix, GF_TRUE, GF_FALSE, dasher->segment_marker_4cc, &idx_start_range, &idx_end_range, NULL);
 		nb_segments++;
 
 		if (!seg_rad_name) {
@@ -2779,11 +2805,11 @@ write_rep_only:
 			tf = (GF_ISOMTrackFragmenter *)gf_list_get(fragmenters, i);
 			gf_isom_get_bitrate(input, tf->OriginalTrack, 0, &bw, NULL, NULL);
 			if (!bw) {
-				bw = gf_isom_get_media_data_size(input, tf->OriginalTrack);
-				bw *= 8;
-				bw /= file_duration;
+				u64 msize = gf_isom_get_media_data_size(input, tf->OriginalTrack);
+				msize *= 8;
+				bw = (u32) (msize / file_duration);
 			}
-			bandwidth += bw;
+			bandwidth += (u32) bw;
 		}
 	}
 
@@ -3090,8 +3116,8 @@ write_rep_only:
 	/*store context*/
 	if (dasher->dash_ctx) {
 		period_duration += (u64)segment_start_time; //change to get a Double period duration
-
-		for (i=0; i<gf_list_count(fragmenters); i++) {
+		count = gf_list_count(fragmenters);
+		for (i=0; i<count; i++) {
 			tf = (GF_ISOMTrackFragmenter *)gf_list_get(fragmenters, i);
 
 			/*InitialTSOffset is used when joining different files - if we are still in the same file , do not update it*/
@@ -3490,6 +3516,8 @@ static GF_Err dasher_isom_create_init_segment(GF_DashSegInput *dash_inputs, u32 
 	u32 first_track = 0;
 	Bool single_segment = (dash_opts->single_file_mode==1) ? GF_TRUE : GF_FALSE;
 	GF_ISOFile *init_seg;
+	u32 force_timescale = 0;
+	GF_DashSegInput *first_dash_input = NULL;
 
 
 	probe_inband_param_set = dash_opts->inband_param_set ? 1 : 0;
@@ -3753,9 +3781,16 @@ retry_track:
 				if (max_track_duration < gf_isom_get_track_duration(in, j+1)) {
 					max_track_duration = gf_isom_get_track_duration(in, j+1);
 				}
+
+				if (!first_dash_input && !force_timescale && dash_inputs[i].sscale) {
+					force_timescale = gf_isom_get_media_timescale(in, j+1);
+				}
 			}
 		}
-		if (!i) {
+
+		if (!first_dash_input) {
+			first_dash_input = &dash_inputs[i];
+
 			//force ISO6 since we use tfdt all over the place
 			gf_isom_set_brand_info(init_seg, GF_ISOM_BRAND_ISO6, 1);
 			gf_isom_modify_alternate_brand(init_seg, GF_ISOM_BRAND_ISOM, 0);
@@ -3788,6 +3823,8 @@ retry_track:
 		gf_delete_file(szInitName);
 		return GF_OK;
 	} else {
+		if (force_timescale) gf_isom_set_timescale(init_seg, force_timescale);
+
 		e = gf_isom_close(init_seg);
 
 		if (probe_inband_param_set) {
@@ -5141,7 +5178,7 @@ static GF_Err gf_dash_segmenter_probe_input(GF_DashSegInput **io_dash_inputs, u3
 
 		/*if this dash input file has only one track, or this has not the scalable track: handle as one representation*/
 		if ((nb_track == 1) || !gf_isom_needs_layer_reconstruction(file)) {
-
+			u32 track_num = nb_track;
 			if (uri_frag) {
 				u32 id = 0;
 				if (!strnicmp(uri_frag+1, "trackID=", 8))
@@ -5172,9 +5209,10 @@ static GF_Err gf_dash_segmenter_probe_input(GF_DashSegInput **io_dash_inputs, u3
 					}
 				}
 				dash_input->single_track_num = gf_isom_get_track_by_id(file, id);
-				nb_track = dash_input->single_track_num;
+				track_num = dash_input->single_track_num;
+				if (nb_track==1) dash_input->single_track_num = 0;
 			}
-			dash_input->protection_scheme_type = gf_isom_is_media_encrypted(file, nb_track, 1);
+			dash_input->protection_scheme_type = gf_isom_is_media_encrypted(file, track_num, 1);
 
 			dash_input->moof_seqnum_increase = 0;
 
@@ -6328,12 +6366,13 @@ GF_Err gf_dasher_set_segment_marker(GF_DASHSegmenter *dasher, u32 segment_marker
 }
 
 GF_EXPORT
-GF_Err gf_dasher_enable_sidx(GF_DASHSegmenter *dasher, Bool enable_sidx, u32 subsegs_per_sidx, Bool daisy_chain_sidx)
+GF_Err gf_dasher_enable_sidx(GF_DASHSegmenter *dasher, Bool enable_sidx, u32 subsegs_per_sidx, Bool daisy_chain_sidx, Bool use_ssix)
 {
 	if (!dasher) return GF_BAD_PARAM;
 	dasher->enable_sidx = enable_sidx;
 	dasher->subsegs_per_sidx = subsegs_per_sidx;
 	dasher->daisy_chain_sidx = daisy_chain_sidx;
+	dasher->use_ssix = use_ssix;
 	return GF_OK;
 }
 
@@ -6541,6 +6580,7 @@ GF_Err gf_dasher_add_input(GF_DASHSegmenter *dasher, GF_DashSegmenterInput *inpu
 	dash_input->nb_p_descs = input->nb_p_descs;
 	dash_input->p_descs = input->p_descs;
 	dash_input->no_cache = dasher->no_cache;
+	dash_input->sscale = input->sscale;
 
 	dash_input->bandwidth = input->bandwidth;
 

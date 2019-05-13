@@ -44,17 +44,22 @@ mp4_test ()
   do_hint=0 ;;
  *.jpeg )
   do_hint=0 ;;
+ # jp2, mjp2 and m1v disabled
  *.jp2 )
-  do_hint=0 ;;
+  return ;;
+ *.mj2 )
+  return ;;
+ *.m1v )
+  return ;;
  *.av1 )
+  do_hint=0 ;;
+ *.opus )
   do_hint=0 ;;
  *.obu )
   do_hint=0 ;;
  *.ivf )
   do_hint=0 ;;
  *.png )
-  do_hint=0 ;;
- *.mj2 )
   do_hint=0 ;;
  *.qcp )
   do_play=0 ;;

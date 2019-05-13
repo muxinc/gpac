@@ -1891,7 +1891,7 @@ GF_Err gf_media_aom_parse_ivf_file_header(GF_BitStream *bs, AV1State *state)
 	return GF_OK;
 }
 
-GF_Err gf_media_parse_ivf_frame_header(GF_BitStream *bs, u64 *frame_size)
+GF_Err gf_media_parse_ivf_frame_header(GF_BitStream *bs, u64 *frame_size, u64 *pts)
 {
 	if (!frame_size) return GF_BAD_PARAM;
 
@@ -1902,7 +1902,7 @@ GF_Err gf_media_parse_ivf_frame_header(GF_BitStream *bs, u64 *frame_size)
 		return GF_NON_COMPLIANT_BITSTREAM;
 	}
 
-	/*TODO: u64 pts = */gf_bs_read_u64(bs);
+	*pts = gf_bs_read_u64_le(bs);
 
 	return GF_OK;
 }
@@ -2210,13 +2210,13 @@ static void vp9_read_interpolation_filter(GF_BitStream *bs)
 GF_Err vp9_parse_sample(GF_BitStream *bs, GF_VPConfig *vp9_cfg, Bool *key_frame, int *FrameWidth, int *FrameHeight, int *renderWidth, int *renderHeight)
 {
 	Bool FrameIsIntra = GF_FALSE, profile_low_bit = GF_FALSE, profile_high_bit = GF_FALSE, show_existing_frame = GF_FALSE, frame_type = GF_FALSE, show_frame = GF_FALSE, error_resilient_mode = GF_FALSE;
-	u8 frame_context_idx = 0, reset_frame_context = 0, frame_marker = 0;
+	/*u8 frame_context_idx = 0, reset_frame_context = 0, frame_marker = 0*/;
 	int Sb64Cols = 0, Sb64Rows = 0;
 
 	assert(bs && key_frame);
 	
 	/*uncompressed header*/
-	frame_marker = gf_bs_read_int(bs, 2);
+	/*frame_marker =*/ gf_bs_read_int(bs, 2);
 	profile_low_bit = gf_bs_read_int(bs, 1);
 	profile_high_bit = gf_bs_read_int(bs, 1);
 	vp9_cfg->profile = (profile_high_bit << 1) + profile_low_bit;
@@ -2257,7 +2257,7 @@ GF_Err vp9_parse_sample(GF_BitStream *bs, GF_VPConfig *vp9_cfg, Bool *key_frame,
 		FrameIsIntra = intra_only;
 
 		if (error_resilient_mode == GF_FALSE) {
-			reset_frame_context = gf_bs_read_int(bs, 2);
+			/*reset_frame_context =*/ gf_bs_read_int(bs, 2);
 		}
 
 		if (intra_only == GF_TRUE) {
@@ -2295,10 +2295,10 @@ GF_Err vp9_parse_sample(GF_BitStream *bs, GF_VPConfig *vp9_cfg, Bool *key_frame,
 		/*frame_parallel_decoding_mode = */gf_bs_read_int(bs, 1);
 	}
 
-	frame_context_idx = gf_bs_read_int(bs, 2);
+	/*frame_context_idx = */gf_bs_read_int(bs, 2);
 	if (FrameIsIntra || error_resilient_mode) {
 		/*setup_past_independence + save_probs ...*/
-		frame_context_idx = 0;
+		//frame_context_idx = 0;
 	}
 
 	vp9_loop_filter_params(bs);
@@ -2618,8 +2618,8 @@ GF_Err aom_av1_parse_temporal_unit_from_annexb(GF_BitStream *bs, AV1State *state
 
 GF_Err aom_av1_parse_temporal_unit_from_ivf(GF_BitStream *bs, AV1State *state)
 {
-	u64 frame_size;
-	GF_Err e = gf_media_parse_ivf_frame_header(bs, &frame_size);
+	u64 frame_size, pts_ignored;
+	GF_Err e = gf_media_parse_ivf_frame_header(bs, &frame_size, &pts_ignored);
 	if (e) return e;
 	GF_LOG(GF_LOG_DEBUG, GF_LOG_CONTAINER, ("[AV1] IVF frame detected (size "LLU")\n", frame_size));
 
@@ -5865,6 +5865,9 @@ u32 gf_media_avc_reformat_sei(char *buffer, u32 nal_size, AVCState *avc)
 				written = 0;
 			}
 		}
+	} else {
+		//nothing modified, return original nal size
+		written = nal_size;
 	}
 	gf_free(new_buffer);
 
@@ -8188,11 +8191,14 @@ static u32 icount(u32 v)
 
 
 GF_EXPORT
-Bool gf_vorbis_parse_header(GF_VorbisParser *vp, char *data, u32 data_len)
+Bool gf_vorbis_parse_header(ogg_audio_codec_desc *codec, char *data, u32 data_len)
 {
 	u32 pack_type, i, j, k, times, nb_part, nb_books, nb_modes;
+	int l;
 	char szNAME[8];
 	oggpack_buffer opb;
+	Bool res = GF_TRUE;
+	GF_VorbisParser *vp = codec->parserPrivateState;
 
 	oggpack_readinit(&opb, (u8*)data, data_len);
 	pack_type = oggpack_read(&opb, 8);
@@ -8202,38 +8208,53 @@ Bool gf_vorbis_parse_header(GF_VorbisParser *vp, char *data, u32 data_len)
 		i++;
 	}
 	szNAME[i] = 0;
-	if (strcmp(szNAME, "vorbis")) return vp->is_init = 0;
+	if (strcmp(szNAME, "vorbis")) {
+		res = GF_FALSE;
+		goto exit;
+	}
+
+	if (!vp) {
+		GF_SAFEALLOC(vp, GF_VorbisParser);
+		codec->parserPrivateState = vp;
+		vp->vbs = gf_bs_new(NULL, 0, GF_BITSTREAM_WRITE);
+	}
 
 	switch (pack_type) {
 	case 0x01:
 		vp->version = oggpack_read(&opb, 32);
-		if (vp->version!=0) return 0;
-		vp->channels = oggpack_read(&opb, 8);
-		vp->sample_rate = oggpack_read(&opb, 32);
+		if (vp->version != 0) {
+			res = GF_FALSE;
+			goto exit;
+		}
+		codec->channels = oggpack_read(&opb, 8);
+		codec->sample_rate = oggpack_read(&opb, 32);
 		vp->max_r = oggpack_read(&opb, 32);
 		vp->avg_r = oggpack_read(&opb, 32);
 		vp->low_r = oggpack_read(&opb, 32);
 
 		vp->min_block = 1<<oggpack_read(&opb, 4);
 		vp->max_block = 1<<oggpack_read(&opb, 4);
-		if (vp->sample_rate < 1) return vp->is_init = 0;
-		if (vp->channels < 1) return vp->is_init = 0;
-		if (vp->min_block<8) return vp->is_init = 0;
-		if (vp->max_block < vp->min_block) return vp->is_init = 0;
-		if (oggpack_read(&opb, 1) != 1) return vp->is_init = 0;
-		vp->is_init = 1;
-		return 1;
+		if (codec->sample_rate < 1 || codec->channels < 1 || vp->min_block < 8 || vp->max_block < vp->min_block
+		    || oggpack_read(&opb, 1) != 1) {
+			res = GF_FALSE;
+		}
+		vp->nb_init=1;
+		goto exit;
 	case 0x03:
 		/*trash comments*/
-		vp->is_init ++;
-		return 1;
+		vp->nb_init++;
+		res = GF_TRUE;
+		goto exit;
 	case 0x05:
 		/*need at least bitstream header to make sure we're parsing the right thing*/
-		if (!vp->is_init) return 0;
+		if (!vp->nb_init) {
+			res = GF_FALSE;
+			goto exit;
+		}
 		break;
 	default:
-		vp->is_init = 0;
-		return 0;
+		res = GF_FALSE;
+		goto exit;
 	}
 	/*OK parse codebook*/
 	nb_books = oggpack_read(&opb, 8) + 1;
@@ -8342,13 +8363,14 @@ Bool gf_vorbis_parse_header(GF_VorbisParser *vp, char *data, u32 data_len)
 		if (oggpack_read(&opb, 1)) {
 			u32 nb_steps = oggpack_read(&opb, 8)+1;
 			for (j=0; j<nb_steps; j++) {
-				oggpack_read(&opb, ilog(vp->channels));
-				oggpack_read(&opb, ilog(vp->channels));
+				oggpack_read(&opb, ilog(codec->channels));
+				oggpack_read(&opb, ilog(codec->channels));
 			}
 		}
 		oggpack_read(&opb, 2);
 		if (sub_maps>1) {
-			for(j=0; j<vp->channels; j++) oggpack_read(&opb, 4);
+			for(l=0; l<codec->channels; l++)
+				oggpack_read(&opb, 4);
 		}
 		for (j=0; j<sub_maps; j++) {
 			oggpack_read(&opb, 8);
@@ -8370,7 +8392,13 @@ Bool gf_vorbis_parse_header(GF_VorbisParser *vp, char *data, u32 data_len)
 		vp->modebits++;
 		j>>=1;
 	}
-	return 1;
+
+exit:
+	if (!res) {
+		gf_free(vp);
+		codec->parserPrivateState = NULL;
+	}
+	return res;
 }
 
 GF_EXPORT
@@ -8378,7 +8406,7 @@ u32 gf_vorbis_check_frame(GF_VorbisParser *vp, char *data, u32 data_length)
 {
 	s32 block_size;
 	oggpack_buffer opb;
-	if (!vp->is_init) return 0;
+	if (!vp) return 0;
 	oggpack_readinit(&opb, (unsigned char*)data, data_length);
 	/*not audio*/
 	if (oggpack_read(&opb, 1) !=0) return 0;

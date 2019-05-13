@@ -418,16 +418,17 @@ GF_Err SetTrackDuration(GF_TrackBox *trak)
 GF_Err MergeTrack(GF_TrackBox *trak, GF_TrackFragmentBox *traf, u64 moof_offset, u64 *cumulated_offset, Bool is_first_merge)
 {
 	u32 i, j, chunk_size, track_num;
-	u64 base_offset, data_offset;
+	u64 base_offset, data_offset, traf_duration;
 	u32 def_duration, DescIndex, def_size, def_flags;
 	u32 duration, size, flags, cts_offset, prev_trun_data_offset;
 	u8 pad, sync;
 	u16 degr;
+	Bool first_samp_in_traf=GF_TRUE;
 	GF_TrackFragmentRunBox *trun;
 	GF_TrunEntry *ent;
 
-	void stbl_AppendTime(GF_SampleTableBox *stbl, u32 duration);
-	void stbl_AppendSize(GF_SampleTableBox *stbl, u32 size);
+	void stbl_AppendTime(GF_SampleTableBox *stbl, u32 duration, u32 nb_pack);
+	void stbl_AppendSize(GF_SampleTableBox *stbl, u32 size, u32 nb_pack);
 	void stbl_AppendChunk(GF_SampleTableBox *stbl, u64 offset);
 	void stbl_AppendSampleToChunk(GF_SampleTableBox *stbl, u32 DescIndex, u32 samplesInChunk);
 	void stbl_AppendCTSOffset(GF_SampleTableBox *stbl, s32 CTSOffset);
@@ -461,6 +462,7 @@ GF_Err MergeTrack(GF_TrackBox *trak, GF_TrackFragmentBox *traf, u64 moof_offset,
 	chunk_size = 0;
 	prev_trun_data_offset = 0;
 	data_offset = 0;
+	traf_duration = 0;
 
 	/*in playback mode*/
 	if (traf->tfdt && is_first_merge) {
@@ -482,6 +484,11 @@ GF_Err MergeTrack(GF_TrackBox *trak, GF_TrackFragmentBox *traf, u64 moof_offset,
 		//merge the run
 		for (j=0; j<trun->sample_count; j++) {
 			ent = (GF_TrunEntry*)gf_list_get(trun->entries, j);
+
+			if (!ent) {
+				GF_LOG(GF_LOG_ERROR, GF_LOG_CONTAINER, ("[iso file] Track %d doesn't have enough trun entries (%d) compared to sample count (%d) in run\n", traf->trex->trackID, gf_list_count(trun->entries), trun->sample_count ));
+				break;
+			}
 			size = def_size;
 			duration = def_duration;
 			flags = def_flags;
@@ -496,9 +503,10 @@ GF_Err MergeTrack(GF_TrackBox *trak, GF_TrackFragmentBox *traf, u64 moof_offset,
 				}
 			}
 			//add size first
-			stbl_AppendSize(trak->Media->information->sampleTable, size);
+			stbl_AppendSize(trak->Media->information->sampleTable, size, ent->nb_pack);
 			//then TS
-			stbl_AppendTime(trak->Media->information->sampleTable, duration);
+			stbl_AppendTime(trak->Media->information->sampleTable, duration, ent->nb_pack);
+
 			//add chunk on first sample
 			if (!j) {
 				data_offset = base_offset;
@@ -526,6 +534,17 @@ GF_Err MergeTrack(GF_TrackBox *trak, GF_TrackFragmentBox *traf, u64 moof_offset,
 			}
 			chunk_size += size;
 
+			if (first_samp_in_traf) {
+				first_samp_in_traf = GF_FALSE;
+				stbl_AppendTrafMap(trak->Media->information->sampleTable);
+			}
+			if (ent->nb_pack) {
+				j+= ent->nb_pack-1;
+				traf_duration += ent->nb_pack*duration;
+				continue;
+			}
+
+			traf_duration += duration;
 
 			//CTS
 			cts_offset = (trun->flags & GF_ISOM_TRUN_CTS_OFFSET) ? ent->CTS_Offset : 0;
@@ -545,6 +564,30 @@ GF_Err MergeTrack(GF_TrackBox *trak, GF_TrackFragmentBox *traf, u64 moof_offset,
 			stbl_AppendDependencyType(trak->Media->information->sampleTable, GF_ISOM_GET_FRAG_LEAD(flags), GF_ISOM_GET_FRAG_DEPENDS(flags), GF_ISOM_GET_FRAG_DEPENDED(flags), GF_ISOM_GET_FRAG_REDUNDANT(flags));
 		}
 	}
+	if (traf_duration && trak->editBox && trak->editBox->editList) {
+		for (i=0; i<gf_list_count(trak->editBox->editList->entryList); i++) {
+			GF_EdtsEntry *ent = gf_list_get(trak->editBox->editList->entryList, i);
+			if (ent->was_empty_dur) {
+				u64 extend_dur = traf_duration;
+				extend_dur *= trak->moov->mvhd->timeScale;
+				extend_dur /= trak->Media->mediaHeader->timeScale;
+				ent->segmentDuration += extend_dur;
+			}
+			else if (!ent->segmentDuration) {
+				ent->was_empty_dur = GF_TRUE;
+				if ((s64) traf_duration > ent->mediaTime)
+					traf_duration -= ent->mediaTime;
+				else
+					traf_duration = 0;
+
+				ent->segmentDuration = traf_duration;
+				ent->segmentDuration *= trak->moov->mvhd->timeScale;
+				ent->segmentDuration /= trak->Media->mediaHeader->timeScale;
+			}
+
+		}
+	}
+
 	//in any case, update the cumulated offset
 	//this will handle hypothetical files mixing MOOF offset and implicit non-moof offset
 	*cumulated_offset = data_offset + chunk_size;
@@ -1165,6 +1208,8 @@ GF_Err Track_SetStreamDescriptor(GF_TrackBox *trak, u32 StreamDescriptionIndex, 
 			break;
 		case GF_ISOM_BOX_TYPE_AV01:
 		case GF_ISOM_BOX_TYPE_AV1C:
+		case GF_ISOM_BOX_TYPE_OPUS:
+		case GF_ISOM_BOX_TYPE_DOPS:
 		case GF_ISOM_BOX_TYPE_STXT:
 		case GF_ISOM_BOX_TYPE_WVTT:
 		case GF_ISOM_BOX_TYPE_STPP:
@@ -1211,7 +1256,12 @@ GF_Err Track_SetStreamDescriptor(GF_TrackBox *trak, u32 StreamDescriptionIndex, 
 			entry = (GF_MPEGSampleEntryBox*) entry_v;
 			break;
 		case GF_ISOM_MEDIA_AUDIO:
-			if (esd->decoderConfig->objectTypeIndication==GPAC_OTI_AUDIO_AC3) {
+			if (esd->decoderConfig->objectTypeIndication == GPAC_OTI_MEDIA_OPUS) {
+				GF_MPEGAudioSampleEntryBox *opus = (GF_MPEGAudioSampleEntryBox *)gf_isom_box_new(GF_ISOM_BOX_TYPE_OPUS);
+				if (!opus) return GF_OUT_OF_MEM;
+				opus->cfg_opus = (GF_OpusSpecificBox *)gf_isom_box_new(GF_ISOM_BOX_TYPE_DOPS);
+				entry = (GF_MPEGSampleEntryBox*)opus;
+			} else if (esd->decoderConfig->objectTypeIndication == GPAC_OTI_AUDIO_AC3) {
 				GF_MPEGAudioSampleEntryBox *ac3 = (GF_MPEGAudioSampleEntryBox *) gf_isom_box_new(GF_ISOM_BOX_TYPE_AC3);
 				if (!ac3) return GF_OUT_OF_MEM;
 				ac3->cfg_ac3 = (GF_AC3ConfigBox *) gf_isom_box_new(GF_ISOM_BOX_TYPE_DAC3);

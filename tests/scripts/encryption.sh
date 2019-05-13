@@ -48,6 +48,26 @@ crypto_test_file()
 {
 
 for drm in $MEDIA_DIR/encryption/*.xml ; do
+#vp9 only supports ctr for now
+if [ $1 == "vp9" ] ; then
+ case $drm in
+ *cbc* )
+ 	continue ;;
+ *adobe* )
+ 	continue ;;
+ *isma* )
+ 	continue ;;
+ *cens* )
+ 	continue ;;
+ *clearbytes* )
+ 	continue ;;
+ esac
+elif [ $1 != "avc" ] ; then
+ case $drm in
+ *clearbytes* )
+ 	continue ;;
+ esac
+fi
 
 name=$(basename $drm)
 name=${name%%.*}
@@ -95,5 +115,10 @@ test_end
 #AV1 with small tiles less than 16 bytes
 $MP4BOX -add $EXTERNAL_MEDIA_DIR/import/obu_tiles4x2_grp4.av1 -new $mp4file 2> /dev/null
 crypto_test_file "av1small"
+
+
+#VP9, we only test CTR
+$MP4BOX -add $EXTERNAL_MEDIA_DIR/import/counter_1280_720_I_25_500k.ivf -new $mp4file 2> /dev/null
+crypto_test_file "vp9"
 
 

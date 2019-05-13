@@ -61,6 +61,8 @@ struct __tag_bitstream
 
 	char *buffer_io;
 	u32 buffer_io_size, buffer_written;
+
+	u64 cookie;
 };
 
 GF_Err gf_bs_reassign_buffer(GF_BitStream *bs, const char *buffer, u64 BufferSize)
@@ -559,6 +561,7 @@ void gf_bs_write_int(GF_BitStream *bs, s32 _value, s32 nBits)
 GF_EXPORT
 void gf_bs_write_long_int(GF_BitStream *bs, s64 _value, s32 nBits)
 {
+	if (!nBits) return;
 	if (nBits>64) {
 		gf_bs_write_int(bs, 0, nBits-64);
 		gf_bs_write_long_int(bs, _value, 64);
@@ -1060,6 +1063,14 @@ void gf_bs_set_eos_callback(GF_BitStream *bs, void (*EndOfStream)(void *par), vo
 
 
 GF_EXPORT
+u64 gf_bs_read_u64_le(GF_BitStream *bs)
+{
+	u32 low = gf_bs_read_u32_le(bs);
+	u64 high = gf_bs_read_u32_le(bs);
+	return (high << 32) + low;
+}
+
+GF_EXPORT
 u32 gf_bs_read_u32_le(GF_BitStream *bs)
 {
 	u32 ret, v;
@@ -1179,4 +1190,20 @@ void gf_bs_reassign(GF_BitStream *bs, FILE *stream)
 			gf_bs_seek(bs, bs->position);
 		break;
 	}
+}
+
+u64 gf_bs_set_cookie(GF_BitStream *bs, u64 cookie)
+{
+	u64 res = 0;
+	if (bs) {
+		res = bs->cookie;
+		bs->cookie = cookie;
+	}
+	return res;
+}
+
+u64 gf_bs_get_cookie(GF_BitStream *bs)
+{
+	if (!bs) return 0;
+	return bs->cookie;
 }

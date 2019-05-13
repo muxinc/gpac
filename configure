@@ -114,6 +114,7 @@ want_gcov="no"
 has_joystick="no"
 has_xul="no"
 has_hid="no"
+has_lzma="no"
 enable_joystick="no"
 static_mp4box="no"
 disable_core_tools="no"
@@ -790,7 +791,7 @@ if test "$has_js" = "no" ; then
 
 cat > $TMPC << EOF
 #include <jsapi.h>
-int main( void ) { JSContext *cx=NULL; jsval rp; return JS_AddValueRoot(cx, &rp); }
+int main( void ) { JSContext *cx=NULL; jsval rp; return JS_AddRoot(cx, &rp); }
 EOF
 
     #try local
@@ -804,7 +805,7 @@ EOF
             mozjs_pkgcfg="mozjs"
         elif $pkg_config --exists mozjs185 ; then
             mozjs_pkgcfg="mozjs185"
-    elif docc $js_flags -L$local_lib -ljs -lpthread ; then
+    elif docc $js_flags -L$local_lib -ljs -lpthread -lm ; then
         has_js="local"
         #dc added
     fi
@@ -1234,7 +1235,7 @@ if test "$cross_prefix" = "" ; then
 fi
 
 if test "$has_openjpeg" = "no" ; then
-    if docc -I$local_inc/openjpeg -L$local_lib -lopenjpeg ; then
+    if docc -I$local_inc -L$local_lib -lopenjpeg ; then
         has_openjpeg="local"
     fi
 fi
@@ -1859,6 +1860,22 @@ EOF
 if docc -lhidapi-hidraw $LDFLAGS ; then
     hid_lib="-lhidapi-hidraw"
     has_hid="yes"
+fi
+
+
+
+#look for lzma support
+cat > $TMPC << EOF
+#include <lzma.h>
+int main( void ) { lzma_options_lzma opt_lzma2; lzma_lzma_preset(&opt_lzma2, 9); return 0; }
+EOF
+
+if docc $CFLAGS_DIR -llzma $LDFLAGS ; then
+  has_lzma="yes"
+  GPAC_SH_FLAGS="$GPAC_SH_FLAGS -llzma"
+  if test "$win32" = "yes"; then
+   extralibs="$extralibs -llzma"
+  fi
 fi
 
 #overwrite detection with manual settings
@@ -2872,6 +2889,7 @@ echo "MAD: $has_mad"
 echo "FAAD: $has_faad"
 echo "XVID: $has_xvid"
 echo "FFMPEG: $has_ffmpeg"
+echo "LZMA: $has_lzma"
 echo "Xiph OGG: $has_ogg"
 echo "Platinum UPnP: $has_platinum"
 echo "AVCap: $has_avcap"
@@ -3116,6 +3134,11 @@ fi
 echo "CONFIG_PNG=$has_png" >> config.mak
 if test "$has_png" != "no" ; then
     echo "#define GPAC_HAS_PNG" >> $TMPH
+fi
+
+echo "CONFIG_LZMA=$has_lzma" >> config.mak
+if test "$has_lzma" = "yes"; then
+echo "#define GPAC_HAS_LZMA" >> $TMPH
 fi
 
 echo "CONFIG_JP2=$has_openjpeg" >> config.mak

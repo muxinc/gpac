@@ -388,17 +388,17 @@ void GetGhostNum(GF_StscEntry *ent, u32 EntryIndex, u32 count, GF_SampleTableBox
 }
 
 //Get the offset, descIndex and chunkNumber of a sample...
-GF_Err stbl_GetSampleInfos(GF_SampleTableBox *stbl, u32 sampleNumber, u64 *offset, u32 *chunkNumber, u32 *descIndex, u8 *isEdited)
+GF_Err stbl_GetSampleInfos(GF_SampleTableBox *stbl, u32 sampleNumber, u64 *offset, u32 *chunkNumber, u32 *descIndex, GF_StscEntry **out_ent)
 {
 	GF_Err e;
-	u32 i, j, k, offsetInChunk, size;
+	u32 i, k, offsetInChunk, size;
 	GF_ChunkOffsetBox *stco;
 	GF_ChunkLargeOffsetBox *co64;
 	GF_StscEntry *ent;
 
 	(*offset) = 0;
 	(*chunkNumber) = (*descIndex) = 0;
-	(*isEdited) = 0;
+	if (out_ent) (*out_ent) = NULL;
 	if (!stbl || !sampleNumber) return GF_BAD_PARAM;
 	if (!stbl->ChunkOffset || !stbl->SampleToChunk) return GF_ISOM_INVALID_FILE;
 
@@ -407,7 +407,7 @@ GF_Err stbl_GetSampleInfos(GF_SampleTableBox *stbl, u32 sampleNumber, u64 *offse
 		if (!ent) return GF_BAD_PARAM;
 		(*descIndex) = ent->sampleDescriptionIndex;
 		(*chunkNumber) = sampleNumber;
-		(*isEdited) = ent->isEdited;
+		if (out_ent) *out_ent = ent;
 		if ( stbl->ChunkOffset->type == GF_ISOM_BOX_TYPE_STCO) {
 			stco = (GF_ChunkOffsetBox *)stbl->ChunkOffset;
 			(*offset) = (u64) stco->offsets[sampleNumber - 1];
@@ -441,12 +441,12 @@ GF_Err stbl_GetSampleInfos(GF_SampleTableBox *stbl, u32 sampleNumber, u64 *offse
 	for (; i < stbl->SampleToChunk->nb_entries; i++) {
 		//browse from the current chunk we're browsing from index 1
 		for (; k <= stbl->SampleToChunk->ghostNumber; k++) {
-			//browse all the samples in this chunk
-			for (j = 0; j < ent->samplesPerChunk; j++) {
-				//ok, this is our sample
-				if (stbl->SampleToChunk->firstSampleInCurrentChunk + j == sampleNumber )
-					goto sample_found;
+			if ((stbl->SampleToChunk->firstSampleInCurrentChunk <= sampleNumber)
+				&& (stbl->SampleToChunk->firstSampleInCurrentChunk + ent->samplesPerChunk > sampleNumber)
+			) {
+				goto sample_found;
 			}
+
 			//nope, get to next chunk
 			stbl->SampleToChunk->firstSampleInCurrentChunk += ent->samplesPerChunk;
 			stbl->SampleToChunk->currentChunk ++;
@@ -469,15 +469,22 @@ sample_found:
 
 	(*descIndex) = ent->sampleDescriptionIndex;
 	(*chunkNumber) = ent->firstChunk + stbl->SampleToChunk->currentChunk - 1;
-	(*isEdited) = ent->isEdited;
-
-	//ok, get the size of all the previous sample
+	if (out_ent) *out_ent = ent;
+	assert((*chunkNumber));
+	
+	//ok, get the size of all the previous samples in the chunk
 	offsetInChunk = 0;
-	//warning, firstSampleInChunk is at least 1 - not 0
-	for (i = stbl->SampleToChunk->firstSampleInCurrentChunk; i < sampleNumber; i++) {
-		e = stbl_GetSampleSize(stbl->SampleSize, i, &size);
-		if (e) return e;
-		offsetInChunk += size;
+	//constant size
+	if (stbl->SampleSize->sampleSize) {
+		u32 diff = sampleNumber - stbl->SampleToChunk->firstSampleInCurrentChunk;
+		offsetInChunk += diff * stbl->SampleSize->sampleSize;
+	} else {
+		//warning, firstSampleInChunk is at least 1 - not 0
+		for (i = stbl->SampleToChunk->firstSampleInCurrentChunk; i < sampleNumber; i++) {
+			e = stbl_GetSampleSize(stbl->SampleSize, i, &size);
+			if (e) return e;
+			offsetInChunk += size;
+		}
 	}
 	//OK, that's the size of our offset in the chunk
 	//now get the chunk
@@ -558,7 +565,9 @@ GF_Err stbl_GetSampleDepType(GF_SampleDependencyTypeBox *sdep, u32 SampleNumber,
 	assert(dependsOn && dependedOn && redundant);
 	*dependsOn = *dependedOn = *redundant = 0;
 
-	if (SampleNumber > sdep->sampleCount) return GF_BAD_PARAM;
+	if (SampleNumber > sdep->sampleCount) {
+		return GF_OK;
+	}
 	flag = sdep->sample_info[SampleNumber-1];
 	*isLeading = (flag >> 6) & 3;
 	*dependsOn = (flag >> 4) & 3;
@@ -567,56 +576,5 @@ GF_Err stbl_GetSampleDepType(GF_SampleDependencyTypeBox *sdep, u32 SampleNumber,
 	return GF_OK;
 }
 
-u32 stbl_GetSampleFragmentCount(GF_SampleFragmentBox *stsf, u32 sampleNumber)
-{
-	GF_StsfEntry *ent;
-	u32 i, count;
-	if (!stsf) return 0;
-
-	//check cache
-	if (!stsf->r_currentEntry || (stsf->r_currentEntry->SampleNumber < sampleNumber)) {
-		stsf->r_currentEntry = NULL;
-		stsf->r_currentEntryIndex = 0;
-	}
-	i = stsf->r_currentEntryIndex;
-
-	count = gf_list_count(stsf->entryList);
-	for (; i<count; i++) {
-		ent = (GF_StsfEntry *)gf_list_get(stsf->entryList, i);
-		if (ent->SampleNumber == sampleNumber) {
-			stsf->r_currentEntry = ent;
-			stsf->r_currentEntryIndex = i;
-			return ent->fragmentCount;
-		}
-	}
-	//not found
-	return 0;
-}
-
-u32 stbl_GetSampleFragmentSize(GF_SampleFragmentBox *stsf, u32 sampleNumber, u32 FragmentIndex)
-{
-	GF_StsfEntry *ent;
-	u32 i, count;
-	if (!stsf || !FragmentIndex) return 0;
-
-	//check cache
-	if (!stsf->r_currentEntry || (stsf->r_currentEntry->SampleNumber < sampleNumber)) {
-		stsf->r_currentEntry = NULL;
-		stsf->r_currentEntryIndex = 0;
-	}
-	i = stsf->r_currentEntryIndex;
-	count = gf_list_count(stsf->entryList);
-	for (; i<count; i++) {
-		ent = (GF_StsfEntry *)gf_list_get(stsf->entryList, i);
-		if (ent->SampleNumber == sampleNumber) {
-			stsf->r_currentEntry = ent;
-			stsf->r_currentEntryIndex = i;
-			if (FragmentIndex > ent->fragmentCount) return 0;
-			return ent->fragmentSizes[FragmentIndex - 1];
-		}
-	}
-	//not found
-	return 0;
-}
 
 #endif /*GPAC_DISABLE_ISOM*/

@@ -160,6 +160,9 @@ void isma_ea_node_start(void *sax_cbck, const char *node_name, const char *name_
 					tkc->sel_enc_type = GF_CRYPT_SELENC_CLEAR;
 				}
 			}
+			else if (!stricmp(att->name, "forceType")) {
+				tkc->force_type = GF_TRUE;
+			}
 			else if (!stricmp(att->name, "Preview")) {
 				tkc->sel_enc_type = GF_CRYPT_SELENC_PREVIEW;
 				sscanf(att->value, "%u", &tkc->sel_enc_range);
@@ -265,7 +268,7 @@ void isma_ea_node_start(void *sax_cbck, const char *node_name, const char *name_
 			}
 			else if (!stricmp(att->name, "blockAlign")) {
 				if (!strcmp(att->value, "disable")) tkc->block_align = 1;
-				if (!strcmp(att->value, "always")) tkc->block_align = 2;
+				else if (!strcmp(att->value, "always")) tkc->block_align = 2;
 				else tkc->block_align = 0;
 			}
 		}
@@ -451,8 +454,6 @@ Bool gf_ismacryp_mpeg4ip_get_info(char *kms_uri, char *key, char *salt)
 }
 
 #ifndef GPAC_DISABLE_ISOM_WRITE
-
-void gf_media_update_bitrate(GF_ISOFile *file, u32 track);
 
 /*ISMACrypt*/
 
@@ -1194,9 +1195,8 @@ static GF_Err gf_cenc_encrypt_sample_ctr(GF_Crypt *mc, GF_TrackCryptInfo *tci, G
 				u32 frame_sizes[VP9_MAX_FRAMES_IN_SUPERFRAME];
 
 				if (tci->block_align != 2) {
-					GF_LOG(GF_LOG_ERROR, GF_LOG_AUTHOR, ("[CENC] VP9 mandates that blockAlign=\"always\"\n"));
-					e = GF_NOT_SUPPORTED;
-					goto exit;
+					GF_LOG(GF_LOG_WARNING, GF_LOG_AUTHOR, ("[CENC] VP9 mandates that blockAlign=\"always\". Forcing value.\n"));
+					tci->block_align = 2;
 				}
 
 				pos = gf_bs_get_position(plaintext_bs);
@@ -1594,7 +1594,7 @@ static GF_Err gf_cenc_encrypt_sample_cbc(GF_Crypt *mc, GF_TrackCryptInfo *tci, G
 				}
 				nb_ranges--;
 				if (!nb_ranges) break;
-				
+
 				av1_tile_idx++;
 				clear_bytes = ranges[av1_tile_idx].clear;
 				unit_size = clear_bytes + ranges[av1_tile_idx].encrypted;
@@ -1711,6 +1711,9 @@ GF_Err gf_cenc_encrypt_track(GF_ISOFile *mp4, GF_TrackCryptInfo *tci, void (*pro
 		if ((esd->decoderConfig->objectTypeIndication==GPAC_OTI_VIDEO_AVC) || (esd->decoderConfig->objectTypeIndication==GPAC_OTI_VIDEO_SVC)) {
 			GF_AVCConfig *avccfg = gf_isom_avc_config_get(mp4, track, 1);
 			GF_AVCConfig *svccfg = gf_isom_svc_config_get(mp4, track, 1);
+
+			bytes_in_nalhr = 1;
+
 			if (avccfg)
 				nalu_size_length = avccfg->nal_unit_size;
 			else if (svccfg)
@@ -1729,6 +1732,8 @@ GF_Err gf_cenc_encrypt_track(GF_ISOFile *mp4, GF_TrackCryptInfo *tci, void (*pro
 				break;
 			}
 			tci->is_avc = GF_TRUE;
+			if (!tci->slice_header_clear && tci->clear_bytes)
+				bytes_in_nalhr = tci->clear_bytes;
 
 #if !defined(GPAC_DISABLE_AV_PARSERS)
 			for (i=0; i<gf_list_count(avccfg->sequenceParameterSets); i++) {
@@ -1743,7 +1748,6 @@ GF_Err gf_cenc_encrypt_track(GF_ISOFile *mp4, GF_TrackCryptInfo *tci, void (*pro
 			if (avccfg) gf_odf_avc_cfg_del(avccfg);
 			if (svccfg) gf_odf_avc_cfg_del(svccfg);
 			bs_type = ENC_NALU;
-			bytes_in_nalhr = 1;
 		} else if (esd->decoderConfig->objectTypeIndication==GPAC_OTI_VIDEO_HEVC) {
 			GF_HEVCConfig *hevccfg = gf_isom_hevc_config_get(mp4, track, 1);
 			if (hevccfg)
@@ -1965,11 +1969,14 @@ GF_Err gf_cenc_encrypt_track(GF_ISOFile *mp4, GF_TrackCryptInfo *tci, void (*pro
 				}
 				else if (tci->constant_IV_size == 16) {
 					memcpy(IV, tci->constant_IV, sizeof(char)*16);
-				} else
-					return GF_NOT_SUPPORTED;
-			}
-			else
+				} else {
+					GF_LOG(GF_LOG_ERROR, GF_LOG_AUTHOR, ("[CENC] No IV set and invalid constant IV size %d crypt info file\n", tci->constant_IV_size));
+					return GF_BAD_PARAM;
+				}
+			} else {
+				GF_LOG(GF_LOG_ERROR, GF_LOG_AUTHOR, ("[CENC] Invalid IV size %d in crypt info file\n", tci->IV_size));
 				return GF_NOT_SUPPORTED;
+			}
 
 			e = gf_crypt_init(mc, tci->key, IV);
 			if (e) {
@@ -2199,8 +2206,10 @@ GF_Err gf_cenc_decrypt_track(GF_ISOFile *mp4, GF_TrackCryptInfo *tci, void (*pro
 
 		//sub-sample encryption
 		if (sai && sai->subsample_count) {
+			u32 nb_done = 0;
 			subsample_count = 0;
 			while (gf_bs_available(cyphertext_bs)) {
+				GF_CENCSubSampleEntry *sai_e;
 				assert(subsample_count < sai->subsample_count);
 				if (!sai->IV_size) {
 					//cbcs scheme mode, use constant IV
@@ -2209,25 +2218,32 @@ GF_Err gf_cenc_decrypt_track(GF_ISOFile *mp4, GF_TrackCryptInfo *tci, void (*pro
 						memset(IV+8, 0, sizeof(char)*8);
 					gf_crypt_set_IV(mc, IV, GF_AES_128_KEYSIZE);
 				}
-
-				/*read clear data and write it to pleintext bitstream*/
-				if (max_size < sai->subsamples[subsample_count].bytes_clear_data) {
-					buffer = (char*)gf_realloc(buffer, sizeof(char)*sai->subsamples[subsample_count].bytes_clear_data);
-					max_size = sai->subsamples[subsample_count].bytes_clear_data;
+				sai_e = &sai->subsamples[subsample_count];
+				if (nb_done + sai_e->bytes_clear_data + sai_e->bytes_encrypted_data > samp->dataLength) {
+					GF_LOG(GF_LOG_ERROR, GF_LOG_AUTHOR, ("[CENC] Error in sample %d subsample info: %d bytes in samples but more bytes signaled in subsample data (%d bytes at subsample %d)\n", i+1, samp->dataLength, nb_done + sai_e->bytes_clear_data + sai_e->bytes_encrypted_data, subsample_count+1));
+					e = GF_NON_COMPLIANT_BITSTREAM;
+					goto exit;
 				}
-				gf_bs_read_data(cyphertext_bs, buffer, sai->subsamples[subsample_count].bytes_clear_data);
-				gf_bs_write_data(plaintext_bs, buffer, sai->subsamples[subsample_count].bytes_clear_data);
+				nb_done += sai_e->bytes_clear_data + sai_e->bytes_encrypted_data;
+
+				/*read clear data and write it to plaintext bitstream*/
+				if (max_size < sai_e->bytes_clear_data) {
+					buffer = (char*)gf_realloc(buffer, sizeof(char)*sai_e->bytes_clear_data);
+					max_size = sai_e->bytes_clear_data;
+				}
+				gf_bs_read_data(cyphertext_bs, buffer, sai_e->bytes_clear_data);
+				gf_bs_write_data(plaintext_bs, buffer, sai_e->bytes_clear_data);
 
 				/*now read encrypted data, decrypted it and write to pleintext bitstream*/
-				if (max_size < sai->subsamples[subsample_count].bytes_encrypted_data) {
-					buffer = (char*)gf_realloc(buffer, sizeof(char)*sai->subsamples[subsample_count].bytes_encrypted_data);
-					max_size = sai->subsamples[subsample_count].bytes_encrypted_data;
+				if (max_size < sai_e->bytes_encrypted_data) {
+					buffer = (char*)gf_realloc(buffer, sizeof(char)*sai_e->bytes_encrypted_data);
+					max_size = sai_e->bytes_encrypted_data;
 				}
-				gf_bs_read_data(cyphertext_bs, buffer, sai->subsamples[subsample_count].bytes_encrypted_data);
+				gf_bs_read_data(cyphertext_bs, buffer, sai_e->bytes_encrypted_data);
 				//pattern decryption
 				if (crypt_byte_block && skip_byte_block) {
 					u32 pos = 0;
-					u32 res = sai->subsamples[subsample_count].bytes_encrypted_data;
+					u32 res = sai_e->bytes_encrypted_data;
 
 					if (!is_ctr_mode) {
 						u32 clear_trailing = res % 16;
@@ -2244,9 +2260,9 @@ GF_Err gf_cenc_decrypt_track(GF_ISOFile *mp4, GF_TrackCryptInfo *tci, void (*pro
 						}
 					}
 				} else {
-					gf_crypt_decrypt(mc, buffer, sai->subsamples[subsample_count].bytes_encrypted_data);
+					gf_crypt_decrypt(mc, buffer, sai_e->bytes_encrypted_data);
 				}
-				gf_bs_write_data(plaintext_bs, buffer, sai->subsamples[subsample_count].bytes_encrypted_data);
+				gf_bs_write_data(plaintext_bs, buffer, sai_e->bytes_encrypted_data);
 
 				subsample_count++;
 			}
@@ -2627,7 +2643,10 @@ GF_Err gf_decrypt_file(GF_ISOFile *mp4, const char *drm_file)
 		if (idx==count) {
 			if (!drm_file || info->has_common_key) idx = common_idx;
 			/*no available KMS info for this track*/
-			else continue;
+			else {
+				GF_LOG(GF_LOG_WARNING, GF_LOG_AUTHOR, ("[CENC/ISMA] No crypt info found in %s for track %d, keeping track encrypted\n", drm_file, trackID));
+				continue;
+			}
 		}
 		if (count) {
 			a_tci = (GF_TrackCryptInfo *)gf_list_get(info->tcis, idx);
@@ -2635,8 +2654,14 @@ GF_Err gf_decrypt_file(GF_ISOFile *mp4, const char *drm_file)
 		} else {
 			memset(&tci, 0, sizeof(GF_TrackCryptInfo));
 			tci.trackID = trackID;
+			a_tci = NULL;
 		}
 
+		if (a_tci && a_tci->force_type) {
+			scheme_type = tci.scheme_type = a_tci->scheme_type;
+		}
+		if (!tci.trackID)
+			tci.trackID = trackID;
 
 		switch (scheme_type) {
 		case GF_CRYPT_TYPE_ISMA:
@@ -2825,6 +2850,9 @@ static GF_Err gf_cenc_parse_drm_system_info(GF_ISOFile *mp4, const char *drm_fil
 		}
 		if (specInfoSize < 16 + (version ? 4 + 16*KID_count : 0)) {
 			GF_LOG(GF_LOG_WARNING, GF_LOG_AUTHOR, ("[CENC/ISMA] Invalid PSSH blob in version %d: size %d key count %d - ignoring PSSH\n", version, specInfoSize, KID_count));
+			if (specInfo) gf_free(specInfo);
+			if (KIDs) gf_free(KIDs);
+			if (bs) gf_bs_del(bs);
 			continue;
 		}
 		len = specInfoSize - 16 - (version ? 4 + 16*KID_count : 0);

@@ -119,7 +119,7 @@ GF_Err gf_media_change_par(GF_ISOFile *file, u32 track, s32 ar_num, s32 ar_den)
 }
 
 GF_EXPORT
-GF_Err gf_media_remove_non_rap(GF_ISOFile *file, u32 track)
+GF_Err gf_media_remove_non_rap(GF_ISOFile *file, u32 track, Bool non_ref_only)
 {
 	GF_Err e;
 	u32 i, count, di;
@@ -134,10 +134,20 @@ GF_Err gf_media_remove_non_rap(GF_ISOFile *file, u32 track)
 
 	count = gf_isom_get_sample_count(file, track);
 	for (i=0; i<count; i++) {
+		Bool remove = GF_TRUE;
 		GF_ISOSample *samp = gf_isom_get_sample_info(file, track, i+1, &di, &offset);
 		if (!samp) return gf_isom_last_error(file);
 
-		if (samp->IsRAP) {
+		if (samp->IsRAP) remove = GF_FALSE;
+		else if (non_ref_only) {
+			u32 isLeading, dependsOn, dependedOn, redundant;
+			gf_isom_get_sample_flags(file, track, i+1, &isLeading, &dependsOn, &dependedOn, &redundant);
+			if (dependedOn != 2) {
+				remove = GF_FALSE;
+			}
+		}
+
+		if (!remove) {
 			last_dts = samp->DTS;
 			gf_isom_sample_del(&samp);
 			continue;
@@ -845,6 +855,8 @@ GF_ESD *gf_media_map_esd(GF_ISOFile *mp4, u32 track)
 	case GF_ISOM_SUBTYPE_LHV1:
 	case GF_ISOM_SUBTYPE_LHE1:
 	case GF_ISOM_SUBTYPE_AV01:
+	case GF_ISOM_SUBTYPE_VP08:
+	case GF_ISOM_SUBTYPE_VP09:
 		return gf_isom_get_esd(mp4, track, 1);
 	}
 
@@ -920,6 +932,14 @@ GF_ESD *gf_media_map_esd(GF_ISOFile *mp4, u32 track)
 		esd->decoderConfig->objectTypeIndication = GPAC_OTI_AUDIO_MPEG1;
 		gf_odf_desc_del((GF_Descriptor*)esd->decoderConfig->decoderSpecificInfo);
 		esd->decoderConfig->decoderSpecificInfo = NULL;
+		return esd;
+	}
+
+	if (subtype == GF_ISOM_SUBTYPE_OPUS) {
+		esd = gf_isom_get_esd(mp4, track, 1);
+		if (!esd) return NULL;
+
+		esd->decoderConfig->objectTypeIndication = GPAC_OTI_MEDIA_OPUS;
 		return esd;
 	}
 
@@ -2819,7 +2839,6 @@ GF_Err gf_media_change_pl(GF_ISOFile *file, u32 track, u32 profile, u32 level)
 }
 
 #ifndef GPAC_DISABLE_HEVC
-GF_EXPORT
 u32 hevc_get_tile_id(HEVCState *hevc, u32 *tile_x, u32 *tile_y, u32 *tile_width, u32 *tile_height)
 {
 	HEVCSliceInfo *si = &hevc->s_info;
